@@ -1,0 +1,3 @@
+/home/x140x1n/Vault/dev/projects/c/hypr-hotspots/build/CMakeFiles/hypr-hotspots.dir
+/home/x140x1n/Vault/dev/projects/c/hypr-hotspots/build/CMakeFiles/edit_cache.dir
+/home/x140x1n/Vault/dev/projects/c/hypr-hotspots/build/CMakeFiles/rebuild_cache.dir
