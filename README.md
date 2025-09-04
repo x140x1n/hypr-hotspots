@@ -35,39 +35,34 @@ hypr-hotspots allows you to define screen regions that respond to mouse movement
 ## Installation
 
 ```bash
-hyprpm add https://github.com/peter1745/hypr-hotspots.git
+hyprpm add https://github.com/x140x1n/hypr-hotspots.git
 hyprpm enable hypr-hotspots
 ```
 
 ## Configuration
 
-Add to your Hyprland configuration:
+hypr-hotspots uses a two-part configuration structure:
+
+1. **Plugin settings** go inside the plugin block
+2. **Region definitions** are top-level keywords
 
 ```haskell
 plugin {
-  hypr_waybar {
-    // Configuration options here
+  hypr_hotspots {
+    // Plugin configuration options here
+    hide_delay = 500
+    leave_expand_down = 20
   }
 }
+
+// Region definitions (top-level)
+hypr-waybar-region = eDP-1, 0, 0, 1920, 30
+hypr-command-region = eDP-1, 0, 0, 100, 100, rofi -show drun
 ```
 
 ## Configuration Options
 
-### Waybar Regions
-
-#### hypr-waybar-region
-Defines a screen area that toggles a waybar process when interacted with.
-
-**Usage:** `hypr-waybar-region = MONITOR, X, Y, WIDTH, HEIGHT, [WAYBAR_PROCESS_NAME]`
-
-Parameters use monitor-local coordinates (0,0 = top-left corner of monitor).
-
-To name a waybar process:
-```bash
-exec -a process_name waybar
-```
-
-**Example:** `hypr-waybar-region = DP-1, 0, 0, 200, 60, waybar-workspace-dp-1`
+### Plugin Settings (inside plugin block)
 
 #### toggle_bind
 Specifies a key for manual region toggling when mouse is over the region.
@@ -116,7 +111,21 @@ When enabled, waybar will appear after switching workspaces and hide after the c
 **Default:** `1` (enabled)
 **Example:** `show_on_workspace_change = 0` (to disable)
 
-### Command Regions
+### Region Definitions (top-level)
+
+#### hypr-waybar-region
+Defines a screen area that toggles a waybar process when interacted with.
+
+**Usage:** `hypr-waybar-region = MONITOR, X, Y, WIDTH, HEIGHT, [WAYBAR_PROCESS_NAME]`
+
+Parameters use monitor-local coordinates (0,0 = top-left corner of monitor).
+
+To name a waybar process:
+```bash
+exec -a process_name waybar
+```
+
+**Example:** `hypr-waybar-region = DP-1, 0, 0, 200, 60, waybar-workspace-dp-1`
 
 #### hypr-command-region
 Defines a region that executes commands on mouse enter/leave events.
@@ -140,62 +149,64 @@ hypr-command-region = DP-1, 1820, 980, 100, 100, notify-send "Entered", notify-s
 ### Basic Auto-hiding Waybar
 ```haskell
 plugin {
-  hypr_waybar {
-    hypr-waybar-region = eDP-1, 0, 0, 1920, 30
+  hypr_hotspots {
     hide_delay = 500
     leave_expand_down = 20
   }
 }
+
+hypr-waybar-region = eDP-1, 0, 0, 1920, 30
 ```
 
 ### Basic Auto-hiding Waybar with Workspace Preview
 ```haskell
 plugin {
-  hypr_waybar {
-    hypr-waybar-region = eDP-1, 0, 0, 1920, 30
+  hypr_hotspots {
     hide_delay = 1000
     show_on_workspace_change = 1
     leave_expand_down = 20
   }
 }
+
+hypr-waybar-region = eDP-1, 0, 0, 1920, 30
 ```
 
 ### Multi-Monitor with Key Toggle
 ```haskell
 plugin {
-  hypr_waybar {
+  hypr_hotspots {
     toggle_bind = Super_L
     toggle_mode = hold
     hide_delay = 300
-    
-    hypr-waybar-region = DP-1, 0, 0, 200, 60, waybar-workspace-dp-1
-    hypr-waybar-region = DP-1, 1180, 0, 200, 60, waybar-clock-dp-1
-    hypr-waybar-region = DP-2, 0, 0, 1920, 40, waybar-secondary
-    
     leave_expand_left = 15
     leave_expand_right = 15
     leave_expand_down = 25
   }
 }
+
+hypr-waybar-region = DP-1, 0, 0, 200, 60, waybar-workspace-dp-1
+hypr-waybar-region = DP-1, 1180, 0, 200, 60, waybar-clock-dp-1
+hypr-waybar-region = DP-2, 0, 0, 1920, 40, waybar-secondary
 ```
 
 ### Edge Navigation Setup
 ```haskell
 plugin {
-  hypr_waybar {
-    // Left/right edge workspace switching
-    hypr-command-region = eDP-1, 0, 200, 5, 600, hyprctl dispatch workspace -1
-    hypr-command-region = eDP-1, 1915, 200, 5, 600, hyprctl dispatch workspace +1
-    
-    // Corner launcher
-    hypr-command-region = eDP-1, 0, 0, 150, 150, rofi -show drun
-    
-    // Bottom edge waybar
-    hypr-waybar-region = eDP-1, 0, 1070, 1920, 10
+  hypr_hotspots {
     hide_delay = 200
     leave_expand_up = 30
   }
 }
+
+// Left/right edge workspace switching
+hypr-command-region = eDP-1, 0, 200, 5, 600, hyprctl dispatch workspace -1
+hypr-command-region = eDP-1, 1915, 200, 5, 600, hyprctl dispatch workspace +1
+
+// Corner launcher
+hypr-command-region = eDP-1, 0, 0, 150, 150, rofi -show drun
+
+// Bottom edge waybar
+hypr-waybar-region = eDP-1, 0, 1070, 1920, 10
 ```
 
 ## Usage Notes
@@ -216,10 +227,14 @@ hypr-waybar-region = DP-1, 0, 1050, 1920, 30, waybar-bottom
 ### Preventing Accidental Activation
 Use leave area expansion and hide delays:
 ```haskell
-hide_delay = 300
-leave_expand_down = 20
-leave_expand_left = 10
-leave_expand_right = 10
+plugin {
+  hypr_hotspots {
+    hide_delay = 300
+    leave_expand_down = 20
+    leave_expand_left = 10
+    leave_expand_right = 10
+  }
+}
 ```
 
 ### Command Region Guidelines
@@ -232,9 +247,14 @@ leave_expand_right = 10
 
 **Auto-hiding panel:**
 ```haskell
+plugin {
+  hypr_hotspots {
+    hide_delay = 300
+    leave_expand_down = 20
+  }
+}
+
 hypr-waybar-region = eDP-1, 0, 0, 1920, 5
-hide_delay = 300
-leave_expand_down = 20
 ```
 
 **Corner launcher:**
@@ -247,3 +267,13 @@ hypr-command-region = eDP-1, 0, 0, 100, 100, rofi -show drun
 hypr-command-region = eDP-1, 0, 200, 5, 600, hyprctl dispatch workspace -1
 hypr-command-region = eDP-1, 1915, 200, 5, 600, hyprctl dispatch workspace +1
 ```
+
+## Technical Notes
+
+### Why Two Configuration Formats?
+
+Due to Hyprland's configuration system limitations:
+- **Simple values** (numbers, strings, booleans) can be nested inside `plugin { hypr_hotspots { } }`
+- **Complex parsers** (region definitions) must be registered as top-level keywords
+
+This is a constraint of Hyprland's config parser, not a design choice of this plugin.
