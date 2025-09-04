@@ -1,8 +1,0 @@
-[
-{
-  "directory": "/home/x140x1n/Vault/dev/projects/c/hypr-hotspots/build",
-  "command": "/usr/bin/c++ -DGIT_COMMIT_HASH=\\\"\\\" -DWLR_USE_UNSTABLE -Dhypr_hotspots_EXPORTS -I/usr/include/pixman-1 -I/usr/include/hyprland/protocols -I/usr/include/hyprland -I/usr/include/libdrm -O3 -DNDEBUG -std=gnu++23 -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-unused-value -Wno-missing-field-initializers -Wno-narrowing -o CMakeFiles/hypr-hotspots.dir/Main.cpp.o -c /home/x140x1n/Vault/dev/projects/c/hypr-hotspots/Main.cpp",
-  "file": "/home/x140x1n/Vault/dev/projects/c/hypr-hotspots/Main.cpp",
-  "output": "CMakeFiles/hypr-hotspots.dir/Main.cpp.o"
-}
-]
