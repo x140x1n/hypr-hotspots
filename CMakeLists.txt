@@ -12,14 +12,6 @@ pkg_check_modules(xkbcommon REQUIRED xkbcommon)
 
 project(hypr-hotspots)
 
-# Get git commit hash
-execute_process(
-    COMMAND git rev-parse HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_COMMIT_HASH
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 add_library(hypr-hotspots SHARED Main.cpp)
 set_target_properties(hypr-hotspots PROPERTIES PREFIX "")
 
@@ -38,7 +30,6 @@ target_link_libraries(hypr-hotspots
 )
 
 target_compile_definitions(hypr-hotspots PRIVATE 
-    GIT_COMMIT_HASH="${GIT_COMMIT_HASH}"
     WLR_USE_UNSTABLE
 )
 
