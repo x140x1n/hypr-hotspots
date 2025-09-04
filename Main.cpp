@@ -678,10 +678,15 @@ void show_all_waybars_temporarily() {
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 {
     try {
-        // Initialize global state first, but don't call reset() yet
-        global_plugin_state = std::make_unique<PluginState>(handle);
+        // Remove or comment out this version check:
+        // if (HASH != GIT_COMMIT_HASH) {
+        //     throw std::runtime_error("[hypr-hotspots] Version mismatch");
+        // }
         
         // Don't call reset() in constructor - manually initialize instead
+        global_plugin_state = std::make_unique<PluginState>(handle);
+        
+        // Manually initialize state variables
         global_plugin_state->hovered_region = nullptr;
         global_plugin_state->hovered_command_region = nullptr;
         global_plugin_state->allow_show_waybar = true;
@@ -689,12 +694,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         global_plugin_state->toggle_bind_keycode = std::nullopt;
         global_plugin_state->hide_delay_ms = 0;
         global_plugin_state->was_in_leave_area_last_frame = false;
-
-        // Check version after basic initialization
-        const std::string HASH = __hyprland_api_get_hash();
-        if (HASH != GIT_COMMIT_HASH) {
-            throw std::runtime_error("[hypr-hotspots] Version mismatch");
-        }
 
         // Check if compositor is available
         if (!g_pCompositor) {
