@@ -102,16 +102,13 @@ struct PluginState
     std::unordered_map<std::string, uint32_t> keycode_cache;
     
     int hide_delay_ms;
-    std::thread hide_timer_thread;
-    std::atomic<bool> stop_timer_thread{false};
-    std::mutex timer_mutex;
-    std::condition_variable timer_cv;
-    std::atomic<bool> timer_reset_requested{false};
+    std::atomic<bool> hide_timer_active{false};
     std::mutex regions_mutex;
     std::atomic<bool> toggle_in_progress{false};
     
     // Add tracking for previous leave area state
     bool was_in_leave_area_last_frame = false;
+    bool was_in_enter_area_last_frame = false;
 
     // New members for command regions
     std::vector<std::vector<CommandRegion>> monitor_command_regions;
@@ -128,62 +125,18 @@ struct PluginState
         toggle_bind_keycode = std::nullopt;
         hide_delay_ms = 0;
         was_in_leave_area_last_frame = false;
+        was_in_enter_area_last_frame = false;
         
-        // Only stop timer thread if it's already running
-        if (hide_timer_thread.joinable()) {
-            stop_timer_thread = true;
-            timer_cv.notify_all();
-            hide_timer_thread.join();
-        }
-        stop_timer_thread = false;
-        timer_reset_requested = false;
-        // Don't start timer thread here - do it after full initialization
+        // Cancel any active timers
+        hide_timer_active = false;
     }
 
     void initialize_timer_thread() {
-        start_timer_thread();
+        // No longer needed - using simple thread-per-timer approach
     }
 
     void start_timer_thread() {
-        global_plugin_state->hide_timer_thread = std::thread([&]() {
-            while (true) {
-                // ONLY CHANGE: Add this null check to prevent crash on unload
-                if (!global_plugin_state) {
-                    break;
-                }
-                
-                // REST OF YOUR ORIGINAL CODE EXACTLY AS IT WAS
-                std::unique_lock<std::mutex> lock(global_plugin_state->timer_mutex);
-                
-                if (global_plugin_state->stop_timer_thread) {
-                    break;
-                }
-                
-                global_plugin_state->timer_cv.wait(lock, []() {
-                    return global_plugin_state->timer_reset_requested || global_plugin_state->stop_timer_thread; 
-                });
-                
-                if (global_plugin_state->stop_timer_thread) {
-                    break;
-                }
-                
-                global_plugin_state->timer_reset_requested = false;
-                
-                if (global_plugin_state->hide_delay_ms <= 0) {
-                    continue;
-                }
-                
-                bool timeout = !global_plugin_state->timer_cv.wait_for(lock, 
-                    std::chrono::milliseconds(global_plugin_state->hide_delay_ms), 
-                    []() { return global_plugin_state->timer_reset_requested || global_plugin_state->stop_timer_thread; });
-                
-                if (timeout && !global_plugin_state->timer_reset_requested && !global_plugin_state->stop_timer_thread) {
-                    lock.unlock();
-                    hide_all_immediate();
-                    lock.lock();
-                }
-            }
-        });
+        // No longer needed - using simple thread-per-timer approach
     }
     
     void start_hide_timer() {
@@ -192,27 +145,29 @@ struct PluginState
             return;
         }
         
-        std::lock_guard<std::mutex> lock(timer_mutex);
-        timer_reset_requested = true;
-        timer_cv.notify_one();
+        // Cancel any existing timer
+        hide_timer_active = false;
+        
+        // Start new timer in detached thread
+        std::thread([this]() {
+            hide_timer_active = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(hide_delay_ms));
+            
+            // Only execute if timer wasn't cancelled
+            if (hide_timer_active) {
+                hide_all_immediate();
+            }
+        }).detach();
     }
     
     void cancel_hide_timer_if_active() {
-        std::lock_guard<std::mutex> lock(timer_mutex);
-        timer_reset_requested = false;
-        timer_cv.notify_one();
+        hide_timer_active = false;
     }
     
     // Clean shutdown method for plugin exit
     void shutdown() {
-        {
-            std::lock_guard<std::mutex> lock(timer_mutex);
-            stop_timer_thread = true;
-            timer_cv.notify_all();
-        }
-        if (hide_timer_thread.joinable()) {
-            hide_timer_thread.join();
-        }
+        // Cancel any active timers
+        hide_timer_active = false;
     }
     
 private:
@@ -244,15 +199,18 @@ void try_update_hovered_region_state();
 
 void add_notification(std::string_view message)
 {
-    HyprlandAPI::addNotification(
-        global_plugin_state->handle,
-        std::format("[hypr-hotspots]: {}", message),
-        CHyprColor(1.0, 0.2, 0.2, 1.0), 5000);
+    // Only write to debug file, no Hyprland notifications to prevent performance issues
+    FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+    if (debug_file) {
+        fprintf(debug_file, "[hypr-hotspots]: %s\n", message.data());
+        fflush(debug_file);
+        fclose(debug_file);
+    }
 }
 
 auto fetch_process_pid(std::string_view name) -> pid_t
 {
-    auto cmd = std::format("pidof -s {}", name);
+    std::string cmd = "pidof -s " + std::string(name);
 
     char buf[512];
     auto* pidof = popen(cmd.c_str(), "r");
@@ -286,12 +244,18 @@ bool WaybarRegion::is_actually_visible() const
 void WaybarRegion::toggle()
 {
     if (global_plugin_state->toggle_in_progress.exchange(true)) {
+        // Skip - toggle already in progress
         return;
     }
     
-    kill(fetch_process_pid(process_name), SIGUSR1);
+    auto pid = fetch_process_pid(process_name);
     
-    std::thread([]() {
+    if (pid <= 0) {
+        global_plugin_state->toggle_in_progress = false;
+        return;
+    }
+
+    kill(pid, SIGUSR1);    std::thread([]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         global_plugin_state->toggle_in_progress = false;
     }).detach();
@@ -303,7 +267,7 @@ auto keycode_from_name(const std::string& name) -> std::optional<uint32_t>
         return {};
     }
 
-    if (global_plugin_state->keycode_cache.contains(name)) {
+    if (global_plugin_state->keycode_cache.find(name) != global_plugin_state->keycode_cache.end()) {
         return global_plugin_state->keycode_cache.at(name);
     }
 
@@ -342,104 +306,87 @@ void update_mouse(int32_t mx, int32_t my)
 {
     auto active_monitor = g_pCompositor->getMonitorFromCursor();
     if (!active_monitor) {
-        return; // Early return if no monitor found
+        return;
     }
     
-    // Check if monitor ID is valid
     if (static_cast<size_t>(active_monitor->m_id) >= global_plugin_state->monitor_regions.size()) {
-        return; // Early return if monitor ID is out of bounds
-    }
-    
-    auto& regions = global_plugin_state->monitor_regions[active_monitor->m_id];
-    
-    // Get command regions - use non-const access
-    std::vector<CommandRegion>* command_regions_ptr = nullptr;
-    if (static_cast<size_t>(active_monitor->m_id) < global_plugin_state->monitor_command_regions.size()) {
-        command_regions_ptr = &global_plugin_state->monitor_command_regions[active_monitor->m_id];
+        // Debug: Log monitor region issue
+        static bool logged_monitor_issue = false;
+        if (!logged_monitor_issue) {
+            FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+            if (debug_file) {
+                fprintf(debug_file, "Monitor ID %d exceeds regions size %zu\n", active_monitor->m_id, global_plugin_state->monitor_regions.size());
+                fflush(debug_file);
+                fclose(debug_file);
+            }
+            logged_monitor_issue = true;
+        }
+        return;
     }
 
-    // Handle waybar regions (existing logic)
+    auto& regions = global_plugin_state->monitor_regions[active_monitor->m_id];
+    if (regions.empty()) {
+        // Debug: Log empty regions
+        static bool logged_empty_regions = false;
+        if (!logged_empty_regions) {
+            FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+            if (debug_file) {
+                fprintf(debug_file, "No regions configured for monitor %d\n", active_monitor->m_id);
+                fflush(debug_file);
+                fclose(debug_file);
+            }
+            logged_empty_regions = true;
+        }
+        return;
+    }
+
     auto monitor_bounds = active_monitor->logicalBox();
     auto monitor_local_x = mx - static_cast<int32_t>(monitor_bounds.pos().x);
     auto monitor_local_y = my - static_cast<int32_t>(monitor_bounds.pos().y);
 
-    // Remove unused variable warning
     WaybarRegion* new_region = nullptr;
     bool was_in_leave_area = global_plugin_state->was_in_leave_area_last_frame;
+    bool was_in_enter_area = global_plugin_state->was_in_enter_area_last_frame;
     bool is_in_leave_area = false;
     bool is_in_enter_area = false;
 
-    // Find which region we're in (if any) - check enter area first
+    // Find which region we're in (if any)
     for (auto& region : regions) {
         if (region.is_in_enter_area(monitor_local_x, monitor_local_y)) {
             new_region = &region;
             is_in_enter_area = true;
-            is_in_leave_area = true; // Enter area is part of leave area
+            is_in_leave_area = true; // Enter area is also part of leave area
             break;
         }
         else if (region.is_in_leave_area(monitor_local_x, monitor_local_y)) {
             new_region = &region;
             is_in_leave_area = true;
-            is_in_enter_area = false; // In leave area but not enter area
+            is_in_enter_area = false;
             break;
         }
     }
 
     global_plugin_state->hovered_region = new_region;
 
-    // Handle waybar show/hide logic
-    if (is_in_leave_area && !was_in_leave_area) {
-        // Entered leave area (from completely outside)
+    // State transition logic
+    if (is_in_enter_area && !was_in_enter_area) {
+        // Entered enter area - show waybar
         global_plugin_state->cancel_hide_timer_if_active();
-        
-        // Only show waybar if we're in the enter area
-        if (is_in_enter_area && global_plugin_state->allow_show_waybar && new_region && !new_region->is_actually_visible()) {
+        if (new_region) {
             new_region->toggle();
         }
     }
     else if (!is_in_leave_area && was_in_leave_area) {
-        // Left leave area completely
+        // Left leave area completely - start hide timer
         hide_all();
     }
-    else if (is_in_leave_area && was_in_leave_area) {
-        // Still in leave area - cancel any hide timer that might be running
+    else if (is_in_leave_area) {
+        // In any part of leave area - cancel timer to prevent hiding
         global_plugin_state->cancel_hide_timer_if_active();
-        
-        // If we moved from leave-only area to enter area, show waybar
-        if (is_in_enter_area && global_plugin_state->allow_show_waybar && new_region && !new_region->is_actually_visible()) {
-            new_region->toggle();
-        }
     }
 
-    // Update state for next frame
     global_plugin_state->was_in_leave_area_last_frame = is_in_leave_area;
-
-    // Handle command regions (unchanged)
-    auto* old_command_region = global_plugin_state->hovered_command_region;
-    CommandRegion* new_command_region = nullptr;
-
-    if (command_regions_ptr && !command_regions_ptr->empty()) {
-        for (auto& region : *command_regions_ptr) {
-            if (region.is_in_area(monitor_local_x, monitor_local_y)) {
-                new_command_region = &region;
-                break;
-            }
-        }
-    }
-
-    global_plugin_state->hovered_command_region = new_command_region;
-
-    // Command region transitions
-    if (new_command_region && !old_command_region) {
-        new_command_region->execute_enter_command();
-    }
-    else if (!new_command_region && old_command_region) {
-        old_command_region->execute_leave_command();
-    }
-    else if (new_command_region && old_command_region && new_command_region != old_command_region) {
-        old_command_region->execute_leave_command();
-        new_command_region->execute_enter_command();
-    }
+    global_plugin_state->was_in_enter_area_last_frame = is_in_enter_area;
 }
 
 void on_config_pre_reload()
@@ -460,6 +407,7 @@ void on_config_reloaded()
     global_plugin_state->hovered_region = nullptr;
     global_plugin_state->hovered_command_region = nullptr;
     global_plugin_state->was_in_leave_area_last_frame = false;
+    global_plugin_state->was_in_enter_area_last_frame = false;
 
     std::string toggle_bind_str = static_cast<Hyprlang::STRING>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:toggle_bind")->getDataStaticPtr());
     std::string_view toggle_mode_str = static_cast<Hyprlang::STRING>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:toggle_mode")->getDataStaticPtr());
@@ -478,14 +426,14 @@ void on_config_reloaded()
             global_plugin_state->toggle_mode = ToggleMode::Press;
         }
         else {
-            add_notification(std::format("Invalid value '{}' for toggle_mode", toggle_mode_str));
+            // add_notification("Invalid value for toggle_mode");
         }
     }
     else {
         global_plugin_state->allow_show_waybar = true;
         global_plugin_state->toggle_mode = ToggleMode::Hover;
         if (!toggle_bind_str.empty()) {
-            add_notification(std::format("Invalid key name `{}` for toggle_bind", toggle_bind_str));
+            // add_notification("Invalid key name for toggle_bind");
         }
     }
 
@@ -497,12 +445,7 @@ void on_config_reloaded()
         }
     }
 
-    // At the end, ensure timer thread is running
-    if (!global_plugin_state->hide_timer_thread.joinable()) {
-        global_plugin_state->stop_timer_thread = false;
-        global_plugin_state->timer_reset_requested = false;
-        global_plugin_state->initialize_timer_thread();
-    }
+    // Timer thread no longer needed - using simple detached threads
 }
 
 Hyprlang::CParseResult register_waybar_region(const char* cmd, const char* v)
@@ -512,7 +455,7 @@ Hyprlang::CParseResult register_waybar_region(const char* cmd, const char* v)
     auto vars = CVarList{ value };
 
     if (vars.size() < 5) {
-        add_notification(std::format("Invalid number of parameters passed to hypr-waybar-region. Expected at least 5 but got {}", vars.size()));
+        add_notification("Invalid number of parameters passed to hypr-waybar-region");
         result.setError("[hypr-hotspots]: Invalid number of parameters passed to hypr-waybar-region");
         return result;
     }
@@ -520,7 +463,7 @@ Hyprlang::CParseResult register_waybar_region(const char* cmd, const char* v)
     auto monitor = g_pCompositor->getMonitorFromName(vars[0]);
 
     if (!monitor) {
-        add_notification(std::format("No monitor with name {} was found.", vars[0]));
+        add_notification("Monitor not found");
         result.setError("[hypr-hotspots]: Failed to find monitor.");
         return result;
     }
@@ -605,7 +548,7 @@ Hyprlang::CParseResult register_command_region(const char* cmd, const char* v)
 
     auto monitor = g_pCompositor->getMonitorFromName(monitor_name);
     if (!monitor) {
-        add_notification(std::format("No monitor with name {} was found.", monitor_name));
+        add_notification("Monitor not found for command region");
         result.setError("[hypr-hotspots]: Failed to find monitor.");
         return result;
     }
@@ -677,6 +620,18 @@ void show_all_waybars_temporarily() {
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 {
+    // Write to debug file immediately
+    FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "w");
+    if (debug_file) {
+        fprintf(debug_file, "PLUGIN_INIT called\n");
+        fflush(debug_file);
+        fclose(debug_file);
+    }
+    
+    // Try stderr output too
+    fprintf(stderr, "[hypr-hotspots] PLUGIN_INIT called\n");
+    fflush(stderr);
+    
     try {
         // Remove or comment out this version check:
         // if (HASH != GIT_COMMIT_HASH) {
@@ -685,6 +640,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         
         // Don't call reset() in constructor - manually initialize instead
         global_plugin_state = std::make_unique<PluginState>(handle);
+        
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Created PluginState\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
         
         // Manually initialize state variables
         global_plugin_state->hovered_region = nullptr;
@@ -699,11 +661,25 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         if (!g_pCompositor) {
             throw std::runtime_error("[hypr-hotspots] Compositor not available");
         }
+        
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Compositor available\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
 
         // Initialize monitor regions safely
         if (!g_pCompositor->m_monitors.empty()) {
             global_plugin_state->monitor_regions.resize(g_pCompositor->m_monitors.size());
             global_plugin_state->monitor_command_regions.resize(g_pCompositor->m_monitors.size());
+        }
+
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "About to add config values\n");
+            fflush(debug_file);
+            fclose(debug_file);
         }
 
         // Add config values
@@ -716,16 +692,46 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         HyprlandAPI::addConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:leave_expand_down", Hyprlang::INT{0});
         HyprlandAPI::addConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:show_on_workspace_change", Hyprlang::INT{1});
 
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Added config values\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
+
         // Register config keywords with the new nested structure:
         HyprlandAPI::addConfigKeyword(global_plugin_state->handle, "hypr-waybar-region", register_waybar_region, Hyprlang::SHandlerOptions{});
         HyprlandAPI::addConfigKeyword(global_plugin_state->handle, "hypr-command-region", register_command_region, Hyprlang::SHandlerOptions{});
 
-        // Register callbacks
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Added config keywords\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
+
+        // Register callbacks with throttling
         static auto mouse_move = HyprlandAPI::registerCallbackDynamic(global_plugin_state->handle, "mouseMove", [](void* handle, SCallbackInfo& callback_info, std::any value) {
             if (!global_plugin_state) return;
+            
+            // Throttle mouse updates to every 16ms (~60fps) to prevent system sluggishness
+            static auto last_update = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update).count() < 16) {
+                return; // Skip this update
+            }
+            last_update = now;
+            
             auto pos = std::any_cast<const Vector2D>(value);
             update_mouse(static_cast<int32_t>(pos.x), static_cast<int32_t>(pos.y));
         });
+
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Registered mouse callback\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
 
         static auto pre_config_reload = HyprlandAPI::registerCallbackDynamic(global_plugin_state->handle, "preConfigReload", [&](void* self, SCallbackInfo& info, std::any data) { 
             if (global_plugin_state) on_config_pre_reload(); 
@@ -774,12 +780,48 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             }
         });
 
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Registered all callbacks\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
+
         // Start timer thread last
         global_plugin_state->initialize_timer_thread();
+
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Started timer thread\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
+
+        // Debug: Add notification to confirm plugin loaded
+        add_notification("Plugin loaded successfully!");
+        
+        // Write to debug file
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Plugin initialization complete\n");
+            fflush(debug_file);
+            fclose(debug_file);
+        }
 
         return { "hypr-hotspots", "hyprland hotspots plugin", "x140x1n", "1.0" };
     }
     catch (const std::exception& e) {
+        // Log the exception before cleanup
+        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "Exception caught: %s\n", e.what());
+            fflush(debug_file);
+            fclose(debug_file);
+        }
+        
+        fprintf(stderr, "[hypr-hotspots] Exception: %s\n", e.what());
+        fflush(stderr);
+        
         // Don't call add_notification here - it might cause another crash
         // Just clean up and let the plugin fail to load
         global_plugin_state.reset();
