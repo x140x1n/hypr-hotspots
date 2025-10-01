@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <signal.h>
 #include <xkbcommon/xkbcommon.h>
+#include <atomic>
+#include <cstdarg>
 
 extern "C" {
     #include <wayland-server.h>
@@ -103,6 +105,8 @@ struct PluginState
     
     int hide_delay_ms;
     std::atomic<bool> hide_timer_active{false};
+    std::atomic<bool> workspace_timer_active{false};  // New timer for workspace changes
+    std::atomic<uint64_t> timer_generation{0};  // Generation counter to invalidate old timers
     std::mutex regions_mutex;
     std::atomic<bool> toggle_in_progress{false};
     
@@ -129,6 +133,8 @@ struct PluginState
         
         // Cancel any active timers
         hide_timer_active = false;
+        workspace_timer_active = false;
+        timer_generation++; // Invalidate all existing timers
     }
 
     void initialize_timer_thread() {
@@ -145,17 +151,55 @@ struct PluginState
             return;
         }
         
-        // Cancel any existing timer
+        // Cancel any existing timer and increment generation
         hide_timer_active = false;
+        uint64_t current_generation = ++timer_generation;
+        
+        if (global_plugin_state) {
+            int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+            if (debug_enabled) {
+                FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                if (debug_file) {
+                    fprintf(debug_file, "Starting hide timer (%d ms) gen %lu\n", hide_delay_ms, current_generation);
+                    fflush(debug_file);
+                    fclose(debug_file);
+                }
+            }
+        }
         
         // Start new timer in detached thread
-        std::thread([this]() {
+        std::thread([this, current_generation]() {
             hide_timer_active = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(hide_delay_ms));
             
-            // Only execute if timer wasn't cancelled
-            if (hide_timer_active) {
+            // Only execute if timer wasn't cancelled and generation is still current
+            if (hide_timer_active && timer_generation == current_generation) {
+                // Check debug at runtime within lambda
+                if (global_plugin_state) {
+                    int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+                    if (debug_enabled) {
+                        FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                        if (debug_file) {
+                            fprintf(debug_file, "Hide timer expired gen %lu - hiding waybar\n", current_generation);
+                            fflush(debug_file);
+                            fclose(debug_file);
+                        }
+                    }
+                }
                 hide_all_immediate();
+            } else {
+                // Check debug at runtime within lambda
+                if (global_plugin_state) {
+                    int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+                    if (debug_enabled) {
+                        FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                        if (debug_file) {
+                            fprintf(debug_file, "Hide timer gen %lu was cancelled (current gen: %lu)\n", current_generation, timer_generation.load());
+                            fflush(debug_file);
+                            fclose(debug_file);
+                        }
+                    }
+                }
             }
         }).detach();
     }
@@ -164,10 +208,76 @@ struct PluginState
         hide_timer_active = false;
     }
     
+    void start_workspace_timer() {
+        if (hide_delay_ms <= 0) {
+            return;
+        }
+        
+        // Cancel any existing timers and increment generation
+        hide_timer_active = false;
+        workspace_timer_active = false;
+        uint64_t current_generation = ++timer_generation;
+        
+        if (global_plugin_state) {
+            int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+            if (debug_enabled) {
+                FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                if (debug_file) {
+                    fprintf(debug_file, "Starting workspace timer (1000 ms debounce) gen %lu\n", current_generation);
+                    fflush(debug_file);
+                    fclose(debug_file);
+                }
+            }
+        }
+        
+        // Start new workspace timer - this waits before starting the actual hide timer
+        std::thread([this, current_generation]() {
+            workspace_timer_active = true;
+            // Wait 1 second after workspace change before starting hide timer
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            
+            // Only start hide timer if workspace timer wasn't cancelled and generation is still current
+            if (workspace_timer_active && timer_generation == current_generation) {
+                // Check debug at runtime within lambda
+                if (global_plugin_state) {
+                    int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+                    if (debug_enabled) {
+                        FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                        if (debug_file) {
+                            fprintf(debug_file, "Workspace timer expired gen %lu - starting hide timer\n", current_generation);
+                            fflush(debug_file);
+                            fclose(debug_file);
+                        }
+                    }
+                }
+                start_hide_timer();
+            } else {
+                // Check debug at runtime within lambda
+                if (global_plugin_state) {
+                    int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+                    if (debug_enabled) {
+                        FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                        if (debug_file) {
+                            fprintf(debug_file, "Workspace timer gen %lu was cancelled (current gen: %lu)\n", current_generation, timer_generation.load());
+                            fflush(debug_file);
+                            fclose(debug_file);
+                        }
+                    }
+                }
+            }
+        }).detach();
+    }
+    
+    void cancel_workspace_timer_if_active() {
+        workspace_timer_active = false;
+    }
+    
     // Clean shutdown method for plugin exit
     void shutdown() {
         // Cancel any active timers
         hide_timer_active = false;
+        workspace_timer_active = false;
+        timer_generation++; // Invalidate all existing timers
     }
     
 private:
@@ -197,10 +307,32 @@ std::unique_ptr<PluginState> global_plugin_state;
 
 void try_update_hovered_region_state();
 
+bool is_debug_enabled() {
+    if (!global_plugin_state) return false;
+    int64_t debug_enabled = *static_cast<const Hyprlang::INT*>(*HyprlandAPI::getConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug")->getDataStaticPtr());
+    return debug_enabled != 0;
+}
+
+void debug_log(const char* format, ...) {
+    if (!is_debug_enabled()) return;
+    
+    FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+    if (debug_file) {
+        va_list args;
+        va_start(args, format);
+        vfprintf(debug_file, format, args);
+        va_end(args);
+        fflush(debug_file);
+        fclose(debug_file);
+    }
+}
+
 void add_notification(std::string_view message)
 {
-    // Only write to debug file, no Hyprland notifications to prevent performance issues
-    FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+    // Only write to debug file if debug is enabled
+    if (!is_debug_enabled()) return;
+    
+    FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
     if (debug_file) {
         fprintf(debug_file, "[hypr-hotspots]: %s\n", message.data());
         fflush(debug_file);
@@ -320,12 +452,7 @@ void update_mouse(int32_t mx, int32_t my)
         // Debug: Log monitor region issue
         static bool logged_monitor_issue = false;
         if (!logged_monitor_issue) {
-            FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
-            if (debug_file) {
-                fprintf(debug_file, "Monitor ID %d exceeds regions size %zu\n", active_monitor->m_id, global_plugin_state->monitor_regions.size());
-                fflush(debug_file);
-                fclose(debug_file);
-            }
+            debug_log("Monitor ID %ld exceeds regions size %zu\n", (long)active_monitor->m_id, global_plugin_state->monitor_regions.size());
             logged_monitor_issue = true;
         }
         return;
@@ -336,12 +463,7 @@ void update_mouse(int32_t mx, int32_t my)
         // Debug: Log empty regions
         static bool logged_empty_regions = false;
         if (!logged_empty_regions) {
-            FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
-            if (debug_file) {
-                fprintf(debug_file, "No regions configured for monitor %d\n", active_monitor->m_id);
-                fflush(debug_file);
-                fclose(debug_file);
-            }
+            debug_log("No regions configured for monitor %ld\n", (long)active_monitor->m_id);
             logged_empty_regions = true;
         }
         return;
@@ -606,29 +728,10 @@ void try_update_hovered_region_state()
     }
 }
 
-void show_all_waybars_temporarily() {
-    if (!g_pCompositor || !global_plugin_state) {
-        return;
-    }
-    
-    // Show all configured waybar regions that aren't currently visible
-    std::lock_guard<std::mutex> lock(global_plugin_state->regions_mutex);
-    for (auto& regions : global_plugin_state->monitor_regions) {
-        for (auto& region : regions) {
-            if (!region.is_actually_visible()) {
-                region.toggle();
-            }
-        }
-    }
-    
-    // Start the hide timer to hide them after the configured delay
-    global_plugin_state->start_hide_timer();
-}
-
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 {
     // Write to debug file immediately
-    FILE* debug_file = fopen("/tmp/hypr-hotspots-debug.log", "w");
+    FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "w");
     if (debug_file) {
         fprintf(debug_file, "PLUGIN_INIT called\n");
         fflush(debug_file);
@@ -648,7 +751,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         // Don't call reset() in constructor - manually initialize instead
         global_plugin_state = std::make_unique<PluginState>(handle);
         
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Created PluginState\n");
             fflush(debug_file);
@@ -669,7 +772,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             throw std::runtime_error("[hypr-hotspots] Compositor not available");
         }
         
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Compositor available\n");
             fflush(debug_file);
@@ -682,7 +785,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             global_plugin_state->monitor_command_regions.resize(g_pCompositor->m_monitors.size());
         }
 
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "About to add config values\n");
             fflush(debug_file);
@@ -698,8 +801,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         HyprlandAPI::addConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:leave_expand_up", Hyprlang::INT{0});
         HyprlandAPI::addConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:leave_expand_down", Hyprlang::INT{0});
         HyprlandAPI::addConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:show_on_workspace_change", Hyprlang::INT{1});
+        HyprlandAPI::addConfigValue(global_plugin_state->handle, "plugin:hypr_hotspots:debug", Hyprlang::INT{0});
 
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Added config values\n");
             fflush(debug_file);
@@ -710,7 +814,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         HyprlandAPI::addConfigKeyword(global_plugin_state->handle, "hypr-waybar-region", register_waybar_region, Hyprlang::SHandlerOptions{});
         HyprlandAPI::addConfigKeyword(global_plugin_state->handle, "hypr-command-region", register_command_region, Hyprlang::SHandlerOptions{});
 
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Added config keywords\n");
             fflush(debug_file);
@@ -733,7 +837,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             update_mouse(static_cast<int32_t>(pos.x), static_cast<int32_t>(pos.y));
         });
 
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Registered mouse callback\n");
             fflush(debug_file);
@@ -755,8 +859,52 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             
             if (show_on_workspace_change && !global_plugin_state->monitor_regions.empty()) {
                 if (global_plugin_state->hide_delay_ms > 0) {
+                    if (is_debug_enabled()) {
+                        FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                        if (debug_file) {
+                            fprintf(debug_file, "Workspace changed - canceling timers and showing waybar\n");
+                            fflush(debug_file);
+                            fclose(debug_file);
+                        }
+                    }
+                    
+                    // Cancel any existing timers to prevent hiding during workspace switching
                     global_plugin_state->cancel_hide_timer_if_active();
-                    show_all_waybars_temporarily();
+                    global_plugin_state->cancel_workspace_timer_if_active();
+                    
+                    // Show all waybar regions that aren't currently visible
+                    std::lock_guard<std::mutex> lock(global_plugin_state->regions_mutex);
+                    for (auto& regions : global_plugin_state->monitor_regions) {
+                        for (auto& region : regions) {
+                            if (!region.is_actually_visible()) {
+                                region.toggle();
+                            }
+                        }
+                    }
+                    
+                    // Only start workspace timer if mouse is NOT in a leave area
+                    if (!global_plugin_state->was_in_leave_area_last_frame) {
+                        // Start debounced workspace timer - only starts hide timer after 1 second of no workspace changes
+                        global_plugin_state->start_workspace_timer();
+                        
+                        if (is_debug_enabled()) {
+                            FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                            if (debug_file) {
+                                fprintf(debug_file, "Started workspace timer (mouse not in leave area)\n");
+                                fflush(debug_file);
+                                fclose(debug_file);
+                            }
+                        }
+                    } else {
+                        if (is_debug_enabled()) {
+                            FILE* debug_file = fopen("/tmp/hypr-hotspots.log", "a");
+                            if (debug_file) {
+                                fprintf(debug_file, "Mouse in leave area - not starting workspace timer\n");
+                                fflush(debug_file);
+                                fclose(debug_file);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -787,7 +935,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             }
         });
 
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Registered all callbacks\n");
             fflush(debug_file);
@@ -797,7 +945,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         // Start timer thread last
         global_plugin_state->initialize_timer_thread();
 
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Started timer thread\n");
             fflush(debug_file);
@@ -808,7 +956,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         add_notification("Plugin loaded successfully!");
         
         // Write to debug file
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Plugin initialization complete\n");
             fflush(debug_file);
@@ -819,7 +967,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
     }
     catch (const std::exception& e) {
         // Log the exception before cleanup
-        debug_file = fopen("/tmp/hypr-hotspots-debug.log", "a");
+        debug_file = fopen("/tmp/hypr-hotspots.log", "a");
         if (debug_file) {
             fprintf(debug_file, "Exception caught: %s\n", e.what());
             fflush(debug_file);
