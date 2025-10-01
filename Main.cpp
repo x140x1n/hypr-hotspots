@@ -308,7 +308,14 @@ void update_mouse(int32_t mx, int32_t my)
     if (!active_monitor) {
         return;
     }
-    
+
+    // Check if there's a fullscreen window on the active monitor
+    auto workspace = g_pCompositor->getWorkspaceByID(active_monitor->activeWorkspaceID());
+    if (workspace && workspace->m_hasFullscreenWindow) {
+        // Don't process hotspots when there's a fullscreen window
+        return;
+    }
+
     if (static_cast<size_t>(active_monitor->m_id) >= global_plugin_state->monitor_regions.size()) {
         // Debug: Log monitor region issue
         static bool logged_monitor_issue = false;
