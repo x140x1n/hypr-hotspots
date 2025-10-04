@@ -458,6 +458,45 @@ void update_mouse(int32_t mx, int32_t my)
         return;
     }
 
+    auto monitor_bounds = active_monitor->logicalBox();
+    auto monitor_local_x = mx - static_cast<int32_t>(monitor_bounds.pos().x);
+    auto monitor_local_y = my - static_cast<int32_t>(monitor_bounds.pos().y);
+
+    // Check command regions first
+    CommandRegion* new_command_region = nullptr;
+    if (static_cast<size_t>(active_monitor->m_id) < global_plugin_state->monitor_command_regions.size()) {
+        auto& command_regions = global_plugin_state->monitor_command_regions[active_monitor->m_id];
+        for (auto& region : command_regions) {
+            if (region.is_in_area(monitor_local_x, monitor_local_y)) {
+                new_command_region = &region;
+                break;
+            }
+        }
+    }
+
+    // Handle command region state changes
+    if (new_command_region != global_plugin_state->hovered_command_region) {
+        // Left previous command region
+        if (global_plugin_state->hovered_command_region) {
+            debug_log("Left command region - executing leave command\n");
+            global_plugin_state->hovered_command_region->execute_leave_command();
+        }
+        
+        // Entered new command region
+        if (new_command_region) {
+            debug_log("Entered command region - executing enter command\n");
+            new_command_region->execute_enter_command();
+        }
+        
+        global_plugin_state->hovered_command_region = new_command_region;
+    }
+
+    // Continue with waybar region processing only if not in a command region
+    if (new_command_region) {
+        // If we're in a command region, don't process waybar regions
+        return;
+    }
+
     auto& regions = global_plugin_state->monitor_regions[active_monitor->m_id];
     if (regions.empty()) {
         // Debug: Log empty regions
@@ -468,10 +507,6 @@ void update_mouse(int32_t mx, int32_t my)
         }
         return;
     }
-
-    auto monitor_bounds = active_monitor->logicalBox();
-    auto monitor_local_x = mx - static_cast<int32_t>(monitor_bounds.pos().x);
-    auto monitor_local_y = my - static_cast<int32_t>(monitor_bounds.pos().y);
 
     WaybarRegion* new_region = nullptr;
     bool was_in_leave_area = global_plugin_state->was_in_leave_area_last_frame;
